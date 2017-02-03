@@ -1,0 +1,36 @@
+Source: kunoichi
+Section: admin
+Priority: optional
+Maintainer: Jordi Mallach <jordi@iti.upv.es>
+Uploaders: Sergio Talens-Oliag <sto@iti.upv.es>
+Build-Depends: debhelper (>= 9)
+Standards-Version: 3.9.5
+Homepage: https://projects.iti.upv.es/trac/sysadmin/
+Vcs-Svn: https://projects.iti.upv.es/svn/sysadmin/packages/trunk/kunoichi/
+Vcs-Browser: https://projects.iti.upv.es/trac/sysadmin/browser/packages/trunk/kunoichi/
+
+Package: kunoichi
+Architecture: all
+Depends: ${misc:Depends}, at, rdiff-backup, python-pylibacl, python-xattr (>= 0.4), bsd-mailx | mailx
+Suggests: lxc, vzctl, util-vserver, kvm, socat
+Description: Create backups for hosts and different virtual servers
+ Kunoichi aims to make backups of virtual server hosts easy. It can
+ backup hosts using LVM snapshots and rdiff-backup and can do individual
+ backups for virtual servers based on KVM, LXC, Linux-VServer or OpenVZ.
+ .
+ Kunoichi was developed by the Institut Tecnològic d'Informàtica, based on
+ some concepts found in Backup Ninja.
+
+Package: iti-kunoichi
+Architecture: all
+Depends: ${misc:Depends}, kunoichi
+Description: Configuration files for Kunoichi.
+ Kunoichi aims to make backups of virtual server hosts easy. It can
+ backup hosts using LVM snapshots and rdiff-backup and can do individual
+ backups for virtual servers based on KVM, LXC, Linux-VServer or OpenVZ.
+ .
+ Kunoichi was developed by the Institut Tecnològic d'Informàtica, based on
+ some concepts found in Backup Ninja.
+ .
+ This package ships configuration files in /etc, tweaked for the needs of
+ the Institut.

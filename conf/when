@@ -1,0 +1,5 @@
+# When to start the backup run
+WHEN="01:00"
+# Optional delay, can specify minutes, hours days or weeks
+# To do a weekly backup, specify 7 days.
+#DELAY="7 days"

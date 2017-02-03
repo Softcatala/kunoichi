@@ -1,0 +1,7 @@
+# This is a POSIX shell snippet
+#
+# Default configuration values for kunoichi
+
+# Brand of the backup system for several visible places
+# like the daily results email.
+BRAND="ITI"

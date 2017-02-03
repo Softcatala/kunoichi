@@ -1,0 +1,4 @@
+# LXC excludes
+# (Per container excludes can be added in every container,
+# using the /etc/kunoichi/excludes file, one exclude item per line)
+LXC_EXCLUDES=""

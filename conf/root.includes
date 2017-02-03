@@ -1,0 +1,6 @@
+# Host includes
+# Stuff to include using an absolute path from the host's root
+ABSOLUTE_INCLUDES="/boot"
+# Stuff to include that is inside the snapshot's root
+# (Kunoichi will add the snapshot mountpoint prefix)
+RELATIVE_INCLUDES=""

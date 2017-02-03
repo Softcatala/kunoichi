@@ -1,0 +1,1126 @@
+#!/bin/sh
+# -------
+# File:		kunoichi
+# Description:	The ninjas have failed, so we'll try female enchants instead.
+# 		Backup a host to a remote backup server, trying to handle
+# 		snapshots, virtual servers and other special cases.
+# Author:	Jordi Mallach <jordi@iti.upv.es>
+# Copyright:	© 2008, 2009 Jordi Mallach <jordi@iti.upv.es>
+# Licence:	This software is licenced under the terms of the
+# 		GNU General Public Licence version 3 or any later version.
+# 		You can get a copy of the GPL in /usr/share/common-licenses
+#		or in the FSF's homepage.
+# SVN Id:	$Id: kunoichi 6284 2012-10-02 12:32:03Z dhernandez $
+# -------
+# TODO:		User stuff, creation of backup users in all hosts.
+# 		SSH key exchange & configuration to allow only certain commands.
+# 		Split KVM stuff in several functions.
+#		Virtual server internal exclude.
+#		Show warnings in main execution output.
+#		Exclude virtual servers entirely.
+# 		Consistent function names.
+
+# Exit on errors. XXX Can we actually do this?
+# FIXME Right now, this breaks stuff all over the place
+#set -e
+
+#############
+# Functions #
+#############
+
+# Print usage information
+usage() {
+echo "Usage: $PACKAGE"
+echo ""
+echo "  --version\t\t\tShow version information."
+echo "  --help\t\t\tShow this help text."
+echo ""
+echo "$PACKAGE does a full backup of the local host onto a remote"
+echo "backup server, taking care of creating LVM snapshots, making"
+echo "safe copies of OpenVZ, Linux-VServer and KVM virtual servers,"
+echo "and running backupninja scripts where needed to have complete"
+echo "copies of Trac, SVN, PostgreSQL, MySQL and other databases."
+}
+
+version() {
+echo "$PACKAGE version \$Rev: 6284 $."
+exit 0
+}
+
+# Error messages
+error() {
+echo "Error: $@"
+}
+
+# Warning messages
+warning() {
+echo "Warning: $@"
+}
+
+# Informational messages
+info() {
+if [ "$VERBOSE" = "yes" ]; then
+    echo "$@"
+fi
+echo "$@" >> $LOGFILE
+}
+
+# Normal messages
+msg() {
+echo "$@"
+}
+
+# Rollback operation messages
+rollback() {
+echo "Rollback: $@"
+}
+
+# Test if target directory exists and is sane
+test_target_directory() {
+local _backup_dir
+if [ -n "$1" ]; then
+    _backup_dir="$1"
+    ssh $BACKUP_USER@$BACKUP_HOST \
+      "test -d '$_backup_dir' || mkdir -p '$_backup_dir'"
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Could not create the target dir $_backup_dir."
+        return $_res
+    fi
+else
+    _backup_dir="$BACKUP_DIR"
+    if [ "$BACKUP_HOST" = "$LOCAL_HOST" -o "$BACKUP_HOST"  = "localhost" ]; then
+        # Find out if any of the dirs that make up $BACKUP_DIR are a mountpoint
+        until [ "$_backup_dir" = "/" ]; do
+            if mountpoint -q "$_backup_dir"; then
+                break
+            else
+                _backup_dir="$(dirname "$_backup_dir")"
+                false
+            fi
+        done
+        _res="$?"
+        # At this point, if we exited with error, we didn't break so
+        # there is no mountpoint.
+        if [ "$_res" -ne 0 -o "$_backup_dir" = "/" ]; then
+            error "Refusing to do a backup to localhost without a backup disk."
+            return $_res
+        fi
+    fi
+fi
+}
+
+# Test if LVM required commands are available
+test_lvm_commands() {
+_res="0"
+test -x $LVCREATE || _res="1"
+test -x $LVREMOVE || _res="1"
+test -x $LVS || _res="1"
+if [ "$_res" -ne 0 ]; then
+    error "One or more required LVM2 commands are missing."
+fi
+return $_res
+}
+
+# Test if KVM required commands are available
+test_kvm_commands() {
+_res="0"
+test -x $RDIFF || _res="1"
+test -x $KVM_NBD || _res="1"
+test -x $SOCAT || _res="1"
+test -x $QM || _res="1"
+if [ "$_res" -ne 0 ]; then
+    error "One or more required KVM commands are missing."
+fi
+return $_res
+}
+
+test_lxc_commands() {
+_res="0"
+test -x $RDIFF || _res="1"
+test -x $LXC_LS || _res="1"
+test -x $LXC_ATTACH || _res="1"
+test -x $LXC_INFO || _res="1"
+if [ "$_res" -ne 0 ]; then
+    error "One or more required LXC commands are missing."
+fi
+return $_res
+}
+
+# Test if OpenVZ required commands are available
+test_openvz_commands() {
+_res="0"
+test -x $RDIFF || _res="1"
+test -x $VZCTL || _res="1"
+test -x $VZLIST || _res="1"
+if [ "$_res" -ne 0 ]; then
+    error "One or more required OpenVZ commands are missing."
+fi
+return $_res
+}
+
+# Test if Linux-VServer required commands are available
+test_vserver_commands () {
+_res="0"
+test -x $RDIFF || _res="1"
+test -x $VSERVER || _res="1"
+test -x $VSERVER_STAT || _res="1"
+if [ "$_res" -ne 0 ]; then
+    error "One or more required Linux-VServer commands are missing."
+fi
+return $_res
+}
+
+# Execute a command on the target host
+exec_command() {
+local cmd
+local rcmd
+
+cmd="\$$1_RCOMMAND"
+rcmd="$(eval "echo $cmd")"
+
+# Execute the command on the remote host
+if [ -n "$rcmd" ]; then
+    ssh $BACKUP_USER@$BACKUP_HOST $rcmd
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "The execution of the $1 command failed."
+        return $_res
+    fi
+fi
+}
+
+# Calculate what LVM volume we should operate on
+lvm_get_device() {
+test_lvm_commands
+
+local backup_path
+local dev
+local mp
+
+# backup_path = path to copy, must be on LVM, eg. /var/lib/vz/private/103/
+# dev = LVM device
+# mp = device's mount point
+backup_path="$@"
+
+# This relies on /etc/fstab having correct data for "/". If it doesn't,
+# there's not a lot we can do about it.
+eval "$(df -P $backup_path | tail -1 | \
+  awk '{ print "dev=\""$1"\"; mp=\""$NF"\";"; }')"
+
+# This is the backup path as found in the snapshot, eg. /private/103
+SNAP_PATH="${backup_path##$mp}"
+# Handle the case where $mp was /, and $SNAP_PATH ends up without a leading /
+SNAP_PATH="$(echo $SNAP_PATH | sed -e's!^\([^/]\)!/\1!')"
+# This is the devmapper device, eg. vg00/root
+# If the device uses the /dev/mapper alias (Debian installs do this), we
+# need to hack around it...
+# dhernandez@iti.upv.es: little hack to work with lvm volumes named with a '-'
+# Jordi used to change '-' with slashes, so in the case of a volume with "--"
+# it was changed to "//" leading to an error.
+if echo $dev | grep -q "^/dev/mapper/"; then
+   dev="$(echo $dev | awk -F / '{ print $NF }' | tr - / | sed "s/\/\//-/")"
+fi
+LVM_DEV="$($LVS --noheadings --separator / -o vg_name,lv_name $dev)"
+# This is the logical volume name, eg. vg00-root
+# dhernandez@iti.upv.es: We change the '-' in the name to a non-lvm usable 
+# character, and we will set it back later. This way, we do not loose 
+# the original name of the device and the script continues its operation.
+LV_NAME_PREV="$(echo $LVM_DEV | tr - @)"
+LV_NAME="$(echo $LV_NAME_PREV | tr / -)"
+# This is the device's parent volume group name
+VG_NAME="$(echo $LV_NAME | awk -F - '{ print $1 }' | tr @ -)"
+# dhernandez@iti.upv.es: We set back LV_NAME
+LV_NAME="$(echo $LV_NAME | tr @ -)"
+# This is the snasphot label, eg. root_snap
+SNAP_LABEL="$(echo $LV_NAME | awk -F - '{ print $NF; }')_snap"
+# This is the snapshot devmapper device, eg /dev/mapper/root_snap
+SNAP_DEV="/dev/$VG_NAME/$SNAP_LABEL"
+# This is the snapshot's mount point
+SNAP_DIR="/$LV_NAME"
+# Find out how many physical extents are free and use it as the snapshot
+# size but raise an error if it's less than 1GB.
+vg_free="$($LVS --noheadings --units b --nosuffix -o vg_free $dev)"
+vg_free_count="$($LVS --noheadings --units b --nosuffix -o vg_free_count $dev)"
+SNAP_SIZE="$vg_free_count"
+}
+
+# Build a bunch of --include & exclude statements to send to rdiff-backup
+process_includes_excludes() {
+# ROOT includes are different than the rest, as they need to handle
+# different cases
+if [ "$1" = "ROOT" ]; then
+    local absinc
+    local relinc
+    for absinc in $(eval echo $ABSOLUTE_INCLUDES); do
+        EXTRA_INCLUDES="$EXTRA_INCLUDES --include $absinc"
+    done
+    for relinc in $(eval echo $RELATIVE_INCLUDES); do
+        EXTRA_INCLUDES="$EXTRA_INCLUDES --include $SNAP_DIR/$relinc"
+    done
+    local absexc
+    local relexc
+    for absexc in $(eval echo $ABSOLUTE_EXCLUDES); do
+        EXTRA_EXCLUDES="$EXTRA_EXCLUDES --exclude $absexc"
+    done
+    for relexc in $(eval echo $RELATIVE_EXCLUDES); do
+        EXTRA_EXCLUDES="$EXTRA_EXCLUDES --exclude $SNAP_DIR/$relexc"
+    done
+    # If KVM, LXC, OpenVZ or VServer backups are enabled, we want to exclude
+    # this data in the root backup
+    COND_EXCLUDES=""
+    if [ "$DO_KVM" = "yes" ]; then
+        COND_EXCLUDES="$COND_EXCLUDES --exclude $SNAP_DIR$KVM_DIR"
+    fi
+    if [ "$DO_LXC" = "yes" ]; then
+        COND_EXCLUDES="$COND_EXCLUDES --exclude $SNAP_DIR$LXC_DIR"
+    fi
+    if [ "$DO_OPENVZ" = "yes" ]; then
+        COND_EXCLUDES="$COND_EXCLUDES --exclude $SNAP_DIR$OPENVZ_DIR/private"
+    fi
+    if [ "$DO_VSERVER" = "yes" ]; then
+        COND_EXCLUDES="$COND_EXCLUDES --exclude $SNAP_DIR$VSERVER_DIR"
+    fi
+else
+    local includes
+    local inc
+    includes="\$$1_INCLUDES"
+    EXTRA_INCLUDES=""
+    for inc in $(eval echo $includes); do
+        EXTRA_INCLUDES="$EXTRA_INCLUDES --include $SNAP_DIR$SNAP_PATH$inc"
+    done
+
+    local excludes
+    excludes="\$$1_EXCLUDES"
+    EXTRA_EXCLUDES=""
+    for inc in $(eval echo $excludes); do
+        EXTRA_EXCLUDES="$EXTRA_EXCLUDES --exclude $SNAP_DIR$SNAP_PATH$inc"
+    done
+fi
+}
+
+# Try to undo all operations and leave the server in a clean state
+failure_cleanup() {
+for dir in $KVM_MOUNTDIR $SNAP_DIR; do
+    if mountpoint -q $dir; then
+        umount $dir
+        _rres="$?"
+        if [ "$_rres" -ne 0 ]; then
+            rollback "Could not umount $dir."
+            return $_rres
+        fi
+        rmdir $dir
+        _rres="$?"
+        if [ "$_rres" -ne 0 ]; then
+            rollback "Could not rmdir $dir."
+            return $_rres
+        fi
+    fi
+done
+
+for snap in $($LVS --noheadings --separator / -o vg_name,lv_name | \
+  grep _snap); do
+    $LVREMOVE -f $snap
+    _rres="$?"
+    if [ "$_rres" -ne 0 ]; then
+        rollback "Could not remove snapshot device $snap."
+        return $_rres
+    fi
+done
+
+rollback "Recovery operations seem to be successful."
+}
+
+# Run backupninja in local LXC containers
+run_lxc_backupninja() {
+test_lxc_commands
+
+srv=$@
+
+if [ "$($LXC_INFO -Hsn $srv)" = "RUNNING" ]; then
+    $LXC_ATTACH -n $srv -- "test -x $BACKUPNINJA"
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        msg "backupninja is not installed in LXC container $srv."
+        return 0
+    fi
+    $LXC_ATTACH -n $srv -- "$BACKUPNINJA -n"
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        # This is not bad enough for us to abort. For example, backupninja
+        # returns 2 if no backup script is configured.
+        error "Running backupninja in LXC container $srv failed."
+    fi
+fi
+}
+
+# Run backupninja in local OpenVZ containers
+run_openvz_backupninja() {
+test_openvz_commands
+
+srv=$@
+
+if [ "$($VZCTL status $srv | awk '{ print $NF; }')" = "running" ]; then
+    # vzctl exec returns weird exit codes when stuff fails.
+    # vzctl exec2 does return the exit code of the command that was executed.
+    $VZCTL exec2 $srv "test -x $BACKUPNINJA"
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        msg "backupninja is not installed in OpenVZ container $srv."
+        return 0
+    fi
+    $VZCTL exec2 $srv "$BACKUPNINJA -n"
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        # This is not bad enough for us to abort. For example, backupninja
+        # returns 2 if no backup script is configured.
+        error "Running backupninja in OpenVZ container $srv failed."
+    fi
+fi
+}
+
+# Run backupninja in local vservers
+run_vserver_backupninja() {
+test_vserver_commands
+
+srv=$@
+
+if [ "$($VSERVER_STAT | awk -v SRV="$srv" '{ if (NR>1 && $1 != 0) if ($NF==SRV) print SRV; }')" = "$srv" ]; then
+    $VSERVER $srv exec test -x $BACKUPNINJA
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        msg "backupninja is not installed in VServer $srv."
+        return 0
+    fi
+    $VSERVER $srv exec $BACKUPNINJA -n
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Running backupninja in VServer $srv failed."
+    fi
+    return $_res
+fi
+}
+
+# Backup all KVM virtual machines qcow2 images
+backup_kvm() {
+test_kvm_commands
+
+# Check destination dir
+test_target_directory $BACKUP_DIR/kvm
+
+for kvm in $(find $KVM_DIR/* -maxdepth 0 -type d -exec basename {} \;); do
+    msg "Starting backup for KVM image $kvm."
+
+    # Make a snapshot of the KVM
+    kvm_savevm $kvm
+
+    # Generate variables for LVM snapshot and mount points
+    lvm_get_device $KVM_DIR/$kvm
+
+    # Make & mount a snapshot
+    lvm_mksnap $KVM_DIR/$kvm
+
+    # Do an rdiff-backup for the KVM
+    $RDIFF $RDIFF_OPTS \
+      --include $SNAP_DIR$SNAP_PATH \
+      --include /etc/qemu-server/$kvm.conf \
+      --exclude '/*' / $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/kvm/$kvm
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed for KVM image $kvm."
+        return $_res
+    fi
+    # If the backup was successful, remove old backups
+    $RDIFF --force --remove-older-than $RDIFF_AGE \
+      $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/kvm/$kvm
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to remove old increments for KVM $kvm."
+        return $_res
+    fi
+
+    # Unmount LVM snapshot
+    lvm_umount_snap
+
+    # Print LVM status
+    lvm_print_status
+
+    # Destroy LVM snapshot
+    lvm_rmsnap $KVM_DIR/$kvm
+
+    msg "Ending backup for KVM image $kvm."
+done
+}
+
+# Backup all KVM virtual machines using a mounted NBD device
+backup_kvm_nbd() {
+# XXX No testing of this stuff AT ALL
+# FIXME Split in 3 funcs.
+test_kvm_commands
+
+# Check destination dir
+test_target_directory $BACKUP_DIR/kvm
+
+modprobe nbd max_part=8
+mkdir $KVM_MOUNTDIR
+for qcow in $(ls $KVM_DIR/*/*.qcow2); do
+    msg "Starting backup for KVM VM $qcow."
+
+    # Make a snapshot of the KVM
+    kvm_savevm $kvm
+
+    # Process excludes for KVM
+    process_includes_excludes KVM
+
+    $KVM_NBD -c /dev/nbd0 $qcow
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Could not create a nbd device for $qcow."
+        return $_res
+    fi
+    mount /dev/nbd0p1 $KVM_MOUNTDIR
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Could not mount nbd device for $qcow."
+        return $_res
+    fi
+    # Do an rdiff-backup for the KVM
+    $RDIFF $RDIFF_OPTS \
+      $EXTRA_EXCLUDES \
+      --include $KVM_MOUNTDIR \
+      --include /etc/qemu-server/$kvm.conf \
+      $EXTRA_INCLUDES \
+      --exclude '/*' / $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/kvm/$qcow
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed for KVM image $qcow."
+        return $_res
+    fi
+    # If the backup was successful, remove old backups
+    $RDIFF --force --remove-older-than $RDIFF_AGE \
+      $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/kvm/$qcow
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to remove old increments for $qcow."
+        return $_res
+    fi
+    umount $KVM_MOUNTDIR
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Could not umount nbd device for $qcow."
+        return $_res
+    fi
+    $KVM_NBD -d /dev/nbd0
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Could not remove nbd device for $qcow."
+        return $_res
+    fi
+
+    msg "Ending backup for KVM VM $qcow."
+done
+rmdir $KVM_MOUNTDIR
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "Could not remove KVM's mount directory."
+    return $_res
+fi
+# If we can't remove the module it won't be a big deal,
+# don't error out in this case.
+rmmod nbd || true
+}
+
+# Make a snapshot of a *running* KVM machine, only if enabled.
+kvm_savevm() {
+test_kvm_commands
+
+kvm=$@
+
+if [ "$($QM status $kvm)" = "running" ] && \
+  grep -q "^# KUNOICHI_KVM_SAVEVM" /etc/qemu-server/$kvm.conf; then
+    # FIXME We need to do this a bit better, waiting for the
+    # command to return and so on, qemu is not that good at
+    # providing feedback.
+    echo "savevm kunoichi" | $SOCAT unix:/var/run/qemu-server/$kvm.mon -
+    echo "info snapshots" | $SOCAT unix:/var/run/qemu-server/$kvm.mon -| \
+      grep -q kunoichi
+    _ret="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "Could not make a snapshot of the $kvm KVM machine."
+        return $_res
+    fi
+fi
+}
+
+# Checkpoint a *running* OpenVZ container, only if a marker is found,
+# and keep a list of suspended OpenVZ containers for later restoration
+checkpoint_openvz() {
+test_openvz_commands
+
+if [ "$($VZCTL status $srv | awk '{ print $NF; }')" = "running" ]; then
+    if [ -f $OPENVZ_DIR/private/$srv/etc/VZ_SUSPEND ]; then
+        # For now, refuse to do this in Ubuntu servers
+        if [ $($VZCTL exec $srv lsb_release -si) = "Ubuntu" ]; then
+            msg "Refusing to checkpoint an Ubuntu container, due to"
+            msg "bugs in the restoration process."
+        else 
+            echo $srv >> $RUNNING_VZ
+            $VZCTL chkpnt $srv
+            _res="$?"
+            if [ "$_res" -ne 0 ]; then
+                error "Could not checkpoint OpenVZ container $srv."
+                return $_res
+            fi
+        fi
+    fi
+fi
+}
+
+# Make a LVM snapshot of the host's filesystem
+lvm_mksnap() {
+test_lvm_commands
+
+# Calculate the LVM device and mountpoint for this snapshot.
+lvm_get_device $@
+
+test -d $SNAP_DIR || mkdir $SNAP_DIR
+
+if mountpoint -q $SNAP_DIR; then
+    error "The LVM snapshot mountpoint for $LV_NAME is already mounted."
+    return 1
+fi
+
+if [ $vg_free -lt 1073741824 ]; then
+    error "The number of free physical extents in $dev is critically low."
+    return 1
+fi
+
+msg "Creating LVM snapshot for $LV_NAME."
+$LVCREATE -s -n $SNAP_LABEL -l$SNAP_SIZE $LVM_DEV > /dev/null
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "Could not create a LVM snapshot for $LV_NAME."
+    return $_res
+fi
+
+msg "Mounting snapshot."
+mount -o ro $SNAP_DEV $SNAP_DIR
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "Could not mount LVM snapshot."
+    return $_res
+fi
+}
+
+# Restore checkpointed OpenVZ containers
+restore_openvz() {
+test_openvz_commands
+
+srv=$@
+
+if egrep -qs "^$srv$" $RUNNING_VZ; then
+    if [ "$($VZCTL status $srv | awk '{ print $NF; }')" = "down" ]; then
+        $VZCTL restore $srv
+        _res="$?"
+        if [ "$_res" -ne 0 ]; then
+            error "Could not restore the OpenVZ container $srv."
+            return $_res
+        fi
+    fi
+fi
+}
+
+# Backup the host using rdiff-backup.
+rdiff_backup_root() {
+test -x $RDIFF || return 1
+
+msg "Starting backup for host $LOCAL_HOST."
+
+# Check destination dir
+test_target_directory $BACKUP_DIR/root
+
+# Generate variables for LVM snapshot and mount points
+lvm_get_device /
+
+# Process excludes for the host
+process_includes_excludes ROOT
+
+# Make & mount a snapshot
+lvm_mksnap /
+
+# Do an rdiff-backup for the host, excluding virtual servers
+$RDIFF $RDIFF_OPTS \
+  $COND_EXCLUDES \
+  $EXTRA_EXCLUDES \
+  --include $SNAP_DIR \
+  $EXTRA_INCLUDES \
+  --exclude '/*' / $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/root/$LOCAL_HOST
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "rdiff-backup failed for $LOCAL_HOST."
+    return $_res
+fi
+# If the backup was successful, remove old backups
+$RDIFF --force --remove-older-than $RDIFF_AGE \
+  $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/root/$LOCAL_HOST
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "rdiff-backup failed to remove old increments for $LOCAL_HOST."
+    return $_res
+fi
+
+# Unmount LVM snapshot
+lvm_umount_snap /
+
+# Print LVM status
+lvm_print_status
+
+# Destroy LVM snapshot
+lvm_rmsnap /
+
+msg "Ending backup for host $LOCAL_HOST."
+}
+
+# Do a rdiff backup of all OpenVZ containers and other valuable
+# data like configuration and vzquotas
+rdiff_backup_openvz() {
+test_openvz_commands
+
+local vzname
+
+# Check destination dir
+test_target_directory $BACKUP_DIR/openvz
+
+# Make sure the list of running OpenVZ containers is empty
+rm -f $RUNNING_VZ
+
+for srv in $($VZLIST -H -a -o ctid 2> /dev/null); do
+    msg "Starting backup for OpenVZ container $srv."
+
+    # Run backupninja in the OpenVZ container
+    run_openvz_backupninja $srv
+
+    # Generate variables for LVM snapshot and mount points
+    lvm_get_device $OPENVZ_DIR/private/$srv
+
+    # Get name of container and its parent cluster to append to the backup dir.
+    if [ -z "$CLUSNAME" ]; then
+        CLUSNAME="$(hostname -s | sed -e's/[0-9]\+$//g')"
+    fi
+
+    # Get name of container. If name is not set, try using hostname.
+    vzname="$($VZLIST -H -o name $srv | cut -f 1 -d ' ')"
+    if [ -z "$vzname" ]; then
+        vzname="$(VZLIST -H -o hostname $srv | cut -f 1 -d ' ' | cut -f 1 -d .)"
+    fi
+
+    # Process excludes for OpenVZ containers
+    process_includes_excludes OPENVZ
+
+    # Checkpoint the OpenVZ container
+    checkpoint_openvz $srv
+
+    # Make & mount a snapshot
+    lvm_mksnap $OPENVZ_DIR/private/$srv
+
+    # Restore the OpenVZ container
+    restore_openvz $srv
+
+    # Do an rdiff-backup for the container
+    $RDIFF $RDIFF_OPTS \
+      --exclude "$SNAP_DIR$SNAP_PATH/tmp/*" \
+      $EXTRA_EXCLUDES \
+      $OPENVZ_CHROOT_EXCLUDES \
+      --include $SNAP_DIR$SNAP_PATH \
+      --include $SNAP_DIR$OPENVZ_DIR/dump/Dump.$srv \
+      --include /etc/vz/conf/$srv.conf \
+      --include /var/lib/vzquota/quota.$srv \
+      $EXTRA_INCLUDES \
+      $OPENVZ_CHROOT_INCLUDES \
+      --exclude '/*' \
+      / $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/openvz/$CLUSNAME/$vzname.$srv
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to backup container $srv."
+        return $_res
+    fi
+    # If the backup was successful, remove old backups
+    $RDIFF --force --remove-older-than $RDIFF_AGE \
+      $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/openvz/$CLUSNAME/$vzname.$srv
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to remove old increments for container $srv."
+        return $_res
+    fi
+
+    # Unmount LVM snapshot
+    lvm_umount_snap
+
+    # Print LVM status
+    lvm_print_status
+
+    # Destroy LVM snapshot
+    lvm_rmsnap $OPENVZ_DIR/private/$srv
+
+    msg "Ending backup for OpenVZ container $srv."
+done
+}
+
+# Do a rdiff backup of all LXC containers and their
+# configuration file.
+rdiff_backup_lxc() {
+test_lxc_commands
+
+# Check destination dir
+test_target_directory $BACKUP_DIR/lxc
+
+for srv in $($LXC_LS); do
+    msg "Starting backup for LXC container $srv."
+
+    # Run backupninja in the LXC container
+    run_lxc_backupninja $srv
+
+    # Generate variables for LVM snapshot and mount points
+    lvm_get_device $LXC_DIR/$srv
+
+    # Get name of LXC container and its parent cluster to append to the
+    # backup dir.
+    if [ -z "$CLUSNAME" ]; then
+        CLUSNAME="$(hostname -s | sed -e's/[0-9]\+$//g')"
+    fi
+
+    # Process excludes for the LXC
+    process_includes_excludes LXC
+
+    # Make & mount a snapshot
+    lvm_mksnap $LXC_DIR/$srv
+
+    # Do an rdiff-backup for the LXC container
+    $RDIFF $RDIFF_OPTS \
+      --exclude "$SNAP_DIR$LXC_DIR/$srv/tmp/*" \
+      $EXTRA_EXCLUDES \
+      $LXC_CHROOT_EXCLUDES \
+      --include $SNAP_DIR$LXC_DIR/$srv \
+      $EXTRA_INCLUDES \
+      $LXC_CHROOT_INCLUDES \
+      --exclude '/*' \
+      / $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/lxc/$CLUSNAME/$srv
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to backup LXC container $srv."
+        return $_res
+    fi
+    # If the backup was successful, remove old backups
+    $RDIFF --force --remove-older-than $RDIFF_AGE \
+      $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/lxc/$CLUSNAME/$srv
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to remove old increments for LXC container $srv."
+        return $_res
+    fi
+
+    # Unmount LVM snapshot
+    lvm_umount_snap
+
+    # Print LVM status
+    lvm_print_status
+
+    # Destroy LVM snapshot
+    lvm_rmsnap $LXC_DIR/$srv
+
+    msg "Ending backup for LXC container $srv."
+done
+}
+
+# Do a rdiff backup of all Linux-Vserver containers and their
+# configuration files
+rdiff_backup_vservers() {
+test_vserver_commands
+
+local vsctx
+
+# Check destination dir
+test_target_directory $BACKUP_DIR/vservers
+
+for srv in $(find $VSERVER_DIR/* -maxdepth 0 -type d -exec basename {} \;); do
+    msg "Starting backup for VServer $srv."
+
+    # Run backupninja in the VServer
+    run_vserver_backupninja $srv
+
+    # Generate variables for LVM snapshot and mount points
+    lvm_get_device $VSERVER_DIR/$srv
+
+    # Get name of vserver and its parent cluster to append to the backup dir.
+    if [ -z "$CLUSNAME" ]; then
+        CLUSNAME="$(hostname -s | sed -e's/[0-9]\+$//g')"
+    fi
+    # Get the CTX of the vserver if it's configured
+    if [ -f /etc/vservers/$srv/context ]; then
+      vsctx="$(cat /etc/vservers/$srv/context)"
+    fi
+
+    # Process excludes for the VServer
+    process_includes_excludes VSERVER
+
+    # Make & mount a snapshot
+    lvm_mksnap $VSERVER_DIR/$srv
+
+    # Do an rdiff-backup for the VServer
+    $RDIFF $RDIFF_OPTS \
+      --exclude "$SNAP_DIR$VSERVER_DIR/$srv/tmp/*" \
+      $EXTRA_EXCLUDES \
+      $VSERVER_CHROOT_EXCLUDES \
+      --include $SNAP_DIR$VSERVER_DIR/$srv \
+      --include /etc/vservers/$srv \
+      $EXTRA_INCLUDES \
+      $VSERVER_CHROOT_INCLUDES \
+      --exclude '/*' \
+      / $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/vservers/$CLUSNAME/$srv.$vsctx
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to backup vserver $srv."
+        return $_res
+    fi
+    # If the backup was successful, remove old backups
+    $RDIFF --force --remove-older-than $RDIFF_AGE \
+      $BACKUP_USER@$BACKUP_HOST::$BACKUP_DIR/vservers/$CLUSNAME/$srv.$vsctx
+    _res="$?"
+    if [ "$_res" -ne 0 ]; then
+        error "rdiff-backup failed to remove old increments for vserver $srv."
+        return $_res
+    fi
+
+    # Unmount LVM snapshot
+    lvm_umount_snap
+
+    # Print LVM status
+    lvm_print_status
+
+    # Destroy LVM snapshot
+    lvm_rmsnap $VSERVER_DIR/$srv
+
+    msg "Ending backup for VServer $srv."
+done
+}
+
+# Unmount LVM snapshot
+lvm_umount_snap() {
+msg "Unmounting LVM snapshot."
+umount $SNAP_DIR
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "Could not unmount LVM snapshot."
+    return $_res
+fi
+rmdir $SNAP_DIR
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "Could not remove the LVM snapshot mount directory."
+    return $_res
+fi
+}
+
+# Print LVM snapshot status.
+lvm_print_status() {
+test_lvm_commands
+
+LVM_USAGE="$($LVS --noheadings -o snap_percent $SNAP_DEV)"
+# If the LVM snapshot was full, warn, as the backup will most
+# probably be incomplete.
+if echo $LVM_USAGE | grep -q 100; then
+    warning "LVM snapshot filled up! Backup might be incomplete!"
+else
+    msg "Backup run ended with LVM snapshot at $LVM_USAGE %."
+fi
+}
+
+# Destroy LVM snapshot
+lvm_rmsnap() {
+test_lvm_commands
+
+lvm_get_device $@
+
+msg "Removing LVM snapshot."
+$LVREMOVE -f "$SNAP_DEV" > /dev/null
+_res="$?"
+if [ "$_res" -ne 0 ]; then
+    error "Could not remove LVM snapshot."
+    error "Run \"$LVREMOVE -f $SNAP_DEV\" to try to fix this."
+    return $_res
+fi
+}
+
+# Cleanup old log files
+remove_old_logfiles() {
+if [ -n "$(ls $LOGFILE_DIR/*.log 2> /dev/null)" ]; then
+    # XXX It would be nice to be able to use $RDIFF_AGE, but how
+    # XXX do we translate rdiff-backup's time notation?
+    find $LOGFILE_DIR -name "*.log" -mtime "+$LOG_AGE" -exec rm {} \;
+fi
+}
+
+# Test if there's a running copy of this script
+test_running_copy() {
+if [ -f "$PIDFILE" ]; then
+    if kill -0 $(cat "$PIDFILE"); then
+        error "An old instance of this backup script is running."
+        exit 1
+    fi
+fi
+}
+
+# Check the return value for our functions
+test_last_command() {
+_res="$1"
+if [ "$_res" -ne 0 ]; then
+    error "Something went wrong with the backup."
+    rollback "Trying to regress to normal status..."
+    failure_cleanup
+    echo ""
+    echo "--*-- BEG: BACKUP LOG --*--"
+    cat "$LOGFILE"
+    echo "--*-- END: BACKUP LOG --*--"
+    echo ""
+    rm -f "$PIDFILE"
+    exit "$_res"
+fi
+}
+
+# If all went OK, say so, and maybe print some statistics.
+print_statistics() {
+if [ "$VERBOSE" = "yes" ]; then
+    msg "SUCCESS: The backup of $LOCAL_HOST finished successfully."
+fi
+}
+
+###############
+# Main script #
+###############
+
+# Initialisation
+# --------------
+
+# Program name. Used on several conf directories and messages
+PACKAGE="kunoichi"
+
+# Read mandatory, configurable variables from a defaults file if present
+[ -r /etc/default/$PACKAGE ] && . /etc/default/$PACKAGE
+# Read mandatory variables which should not be user-modifiable
+if [ -r /usr/share/$PACKAGE/vars ]; then
+    . /usr/share/$PACKAGE/vars
+else
+    error "Could not read /usr/share/$PACKAGE/vars."
+    exit 1
+fi
+
+# Control the few command line options we accept
+if [ "$1" = "--help" ]; then
+    usage
+    exit 0
+elif [ "$1" = "--version" ]; then
+    version
+elif [ -n "$1" ]; then
+    usage
+    exit 1
+fi
+
+# Configuration files
+# -------------------
+
+# Configuration directory
+CONF_DIR="/etc/$PACKAGE"
+
+# Source important variables from config files
+for conffile in options when root.excludes root.includes; do
+    if [ -f $CONF_DIR/$conffile ]; then
+        . $CONF_DIR/$conffile
+    else
+        error "Configuration file $CONF_DIR/$conffile not found. Exiting..."
+        exit 1
+    fi
+done
+
+# Check virtual server configuration files, if they are missing we'll
+# have to disable them
+for method in lxc openvz vserver; do
+    for conffile in excludes includes; do
+        if [ -f $CONF_DIR/$method.$conffile ]; then
+            . $CONF_DIR/$method.$conffile
+        else
+            # Configuration files are missing; disable method
+            _m="$(echo $method | tr [a-z] [A-Z])"
+            eval DO_$_m="no"
+        fi
+    done
+done
+
+# Test if we are already running and abort in that case
+test_running_copy
+
+# Register our PID to the PIDFILE
+echo "$$" > "$PIDFILE"
+
+##################
+# Perform backup #
+##################
+
+# Cleanup old log files
+remove_old_logfiles
+
+# Execute a pre-backup command
+exec_command PRE > "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Execution of pre-backup command completed."
+
+# Test target directory
+test_target_directory >> "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Sanity check of backup directory completed."
+
+# Start backup process
+if [ "$DO_KVM" = "yes" ]; then
+    if [ "$USE_KVM_NBD" != "yes" ]; then
+backup_kvm >> "$LOGFILE" 2>&1
+    else
+backup_kvm_nbd >> "$LOGFILE" 2>&1
+    fi
+test_last_command "$?"
+info "Backup of KVM completed."
+fi
+
+if [ "$DO_LXC" = "yes" ]; then
+rdiff_backup_lxc >> "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Backup of LXC containers completed."
+fi
+
+if [ "$DO_OPENVZ" = "yes" ]; then
+rdiff_backup_openvz >> "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Backup of OpenVZ containers completed."
+fi
+
+if [ "$DO_VSERVER" = "yes" ]; then
+rdiff_backup_vservers >> "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Backup of Linux-VServers completed."
+fi
+
+rdiff_backup_root >> "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Backup of host completed."
+
+# Execute a post-backup command
+exec_command POST >> "$LOGFILE" 2>&1
+test_last_command "$?"
+info "Execution of post-backup command completed."
+
+# If everything went OK, print statistics
+print_statistics
+
+# Remove pidfile
+rm -f "$PIDFILE"
+
+# All went OK, exit normally
+exit 0

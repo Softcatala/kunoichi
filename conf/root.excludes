@@ -1,0 +1,6 @@
+# Host excludes
+# Stuff to exclude using an absolute path from the host's root
+ABSOLUTE_EXCLUDES=""
+# Stuff to exclude that is inside the snapshot's root
+# (Kunoichi will add the snapshot mountpoint prefix)
+RELATIVE_EXCLUDES=""

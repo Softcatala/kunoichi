@@ -1,0 +1,4 @@
+# Linux-VServer excludes
+# (Per vserver excludes can be added in every vserver,
+# using the /etc/kunoichi/excludes file, one exclude item per line)
+VSERVER_EXCLUDES=""

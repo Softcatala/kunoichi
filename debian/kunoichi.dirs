@@ -1,0 +1,3 @@
+etc/kunoichi
+var/log/kunoichi
+var/run/kunoichi

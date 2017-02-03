@@ -1,0 +1,4 @@
+# OpenVZ excludes
+# (Per container excludes can be added in every container,
+# using the /etc/kunoichi/excludes file, one exclude item per line)
+OPENVZ_EXCLUDES=""

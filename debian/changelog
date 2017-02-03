@@ -1,0 +1,114 @@
+kunoichi (0.1) unstable; urgency=low
+
+  * Add LXC containers support.
+  * Bump to debhelper compat v9.
+  * Update Standards-Version to 3.9.5.
+
+ -- Jordi Mallach <jordi@softcatala.org>  Wed, 02 Apr 2014 22:29:34 +0200
+
+kunoichi (0.0.6) unstable; urgency=low
+
+  [ Jordi Mallach ]
+  * Try using the VE's hostname if it has no name assigned.
+  * Add an optional "delay" feature to be able to program backups on
+    more flexible moments (ie, weekly, etc).
+  * Fix at-helper's help text.
+
+  [ Sergio Talens-Oliag ]
+  * Upload new version with Dani's changes (support for LVM volumes with - on
+    their names)
+
+ -- Sergio Talens-Oliag <sto@iti.upv.es>  Tue, 02 Oct 2012 14:38:15 +0200
+
+kunoichi (0.0.5) unstable; urgency=low
+
+  * Get the CTX of vservers directly from /etc/vservers, as vserver-stat
+    can't show any info for non-running servers.
+  * Reinstall atd jobs at 6:59, to avoid logcheck warnings at 7:00.
+
+ -- Jordi Mallach <jordi@iti.upv.es>  Thu, 24 Sep 2009 11:15:55 +0200
+
+kunoichi (0.0.4) unstable; urgency=low
+
+  * Fix a syntax error in kvm_savevm().
+  * Don't quote arguments for vserver exec, they are unecessary unlike with
+    vzctl.
+  * Move execution of backupninja runs into the main for loop of OpenVZ and
+    VServer methods. This way, backupninja operations are run just before
+    the rdiff-backup is done for each virtual server.
+  * Similarly, do savevm's just before rdiffing a kvm image.
+  * Backup the host after all the virtual servers.
+  * Change the target dir for OpenVZ and VServer backups, appending a
+    "cluster name" directory to the tree, and use "name.numid" as the
+    final backup dir. This reduces the possibility of backing up different
+    servers on the same rdiff-backup.
+  * Make the cluster name configurable, to allow overriding badly detected
+    cluster names.
+  * Workaround braindead output from vzlist.
+  * Use vzlist instead of find to avoid backing up migrated OpenVZs, as
+    vzlist will ignore "destroyed" container configurations.
+  * Move away from CDBS, use a single dh call.
+  * Bump Standards-Version to 3.8.3, no changes needed.
+  * Don't stop backing up the virtual server if backupninja is not installed.
+
+ -- Jordi Mallach <jordi@iti.upv.es>  Wed, 23 Sep 2009 16:30:27 +0200
+
+kunoichi (0.0.3) unstable; urgency=low
+
+  * Print the status of the LVM snapshot after every rdiff-backup run.
+    If the snapshot was full, show a warning, as the backup will most
+    probably be incomplete.
+  * Add start & stop markers for each backup in logs.
+  * Remove extra / in OpenVZ method, that cause problems when globbing.
+  * Fix quoting for backupninja executions, getting rid of the mysterious
+    "-n" bug.
+  * Fix generation of $SNAP_PATH when mountpoint is /.
+  * Fix conditional excludes for KVM.
+  * Avoid exiting the backupninja function after it has run only on the first
+    server.
+  * Move the list of running OpenVZs to /var/run/kunoichi, which is a safer
+    location.
+  * Bump requirement on python-xattr to >= 0.4, which matches etch-backports
+    and lenny, and gets rid of a rdiff-backup warning.
+  * Suggest socat, which is used for KVM methods.
+  * Rename one of the two independent uses of KVM_NBD to USE_KVM_NBD.
+  * Adapt non-nbd KVM method to individual snapshot creation.
+  * Silence a use of egrep if the file isn't found.
+  * Minor cleanups.
+
+ -- Jordi Mallach <jordi@iti.upv.es>  Fri, 17 Jul 2009 17:19:30 +0200
+
+kunoichi (0.0.2) unstable; urgency=low
+
+  * Don't limit the maximum size of a snapshot even if the number of
+    available PE's is really huge. Set the lower limit to 1GB and abort
+    if that amount is not available.
+  * Rename $TEST_SNAP_SIZE to $SNAP_SIZE to enable this support, and use
+    vg_free_count (free physical extents) to create the snapshot, as
+    lvcreate does not support providing the snapshot size in bytes.
+  * Don't use a cron.d script. Use iti-backup-tool's at-helper, adapted
+    for kunoichi's needs.
+  * Split configuration files for easier cluster customisation.
+  * Move configuration files to iti-kunoichi. By default, installing only
+    kunoichi won't work due to lack of configuration files.
+  * Rename host method to root, in advance for multiple LVM snapshot support.
+  * Support two kinds of includes/excludes for root backups: absolute, for
+    paths outside the LVM, and relative, for paths insided the LVM.
+  * Check that any component of the backup dir is a mountpoint, not just
+    the destination dir.
+  * Remove binddir support, as there's too many places where it fails to do
+    its intended job.
+  * Support a PRE and POST backup command, via the {PRE,POST}_RCOMMAND
+    variables.
+  * Do not exclude devices, fifos or sockets.
+
+ -- Jordi Mallach <jordi@iti.upv.es>  Thu, 02 Jul 2009 12:19:25 +0200
+
+kunoichi (0.0.1) unstable; urgency=low
+
+  * New spring, new backup system. :)
+  * Initial version.
+  * Part of the code is taken from iti-server-backup, included in 
+    iti-backup-tools.
+
+ -- Jordi Mallach <jordi@iti.upv.es>  Wed, 03 Jun 2009 17:17:32 +0200

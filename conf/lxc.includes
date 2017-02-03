@@ -1,0 +1,4 @@
+# LXC includes
+# (Per container includes can be added in every container,
+# using the /etc/kunoichi/includes file, one include item per line)
+LXC_INCLUDES=""

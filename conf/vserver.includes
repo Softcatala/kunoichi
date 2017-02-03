@@ -1,0 +1,4 @@
+# Linux-VServer includes
+# (Per vserver includes can be added in every vserver,
+# using the /etc/kunoichi/includes file, one include item per line)
+VSERVER_INCLUDES=""

@@ -1,0 +1,52 @@
+# Mandatory varialbes for kunoichi.
+# These shouldn't be user modifiable.
+# This is a POSIX shell snippet.
+
+# Programs & Paths
+# ----------------
+# General
+BACKUPNINJA="/usr/sbin/backupninja"
+RDIFF="/usr/bin/rdiff-backup"
+# LVM
+LVCREATE="/sbin/lvcreate"
+LVREMOVE="/sbin/lvremove"
+LVS="/sbin/lvs"
+# LXC
+LXC_LS="/usr/bin/lxc-ls
+LXC_ATTACH="/usr/bin/lxc-attach"
+LXC_INFO="/usr/bin/lxc-info"
+LXC_DIR="/srv/lxc"
+# OpenVZ
+VZCTL="/usr/sbin/vzctl"
+VZLIST="/usr/sbin/vzlist"
+OPENVZ_DIR="/var/lib/vz"
+RUNNING_VZ="/var/run/kunoichi/running-vz.list"
+# Linux-VServer
+VSERVER="/usr/sbin/vserver"
+VSERVER_STAT="/usr/sbin/vserver-stat"
+VSERVER_DIR="/var/lib/vservers"
+# KVM
+KVM_NBD="/usr/sbin/kvm-nbd"
+SOCAT="/usr/bin/socat"
+QM="/usr/sbin/qm"
+
+KVM_DIR="/var/lib/vz/images"
+
+# Program options
+RDIFF_STATS="--print-statistics"
+RDIFF_OTHER_OPTS="--preserve-numerical-ids"
+RDIFF_OPTS="$RDIFF_OTHER_OPTS $RDIFF_STATS $RDIFF_INCLUDE_OPTS $RDIFF_EXCLUDE_OPTS"
+
+# Misc settings
+# -------------
+# Run under the C locale, but we want non-broken date(1) output
+LANG=C
+LC_TIME=ca_ES.UTF-8
+# Pidfile
+PIDFILE="/var/run/$PACKAGE.pid"
+# Date for report
+REPORT_DATE=$(date -R)
+# Logfiles
+LOGFILE_TIMESTAMP=$(date +"%F-%H.%M.%S")
+LOGFILE_DIR="/var/log/$PACKAGE"
+LOGFILE="$LOGFILE_DIR/$LOGFILE_TIMESTAMP.log"

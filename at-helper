@@ -1,0 +1,88 @@
+#!/bin/sh
+# -------
+# File:		at-helper
+# Description:	Check kunoichi's configuration to find out when we need to 
+#		setup a backup run, and install at jobs accordingly.
+# Author:	Jordi Mallach <jordi@iti.upv.es>
+# Copyright:	© 2008 Jordi Mallach <jordi@iti.upv.es>
+# SVN Id:	$Id: at-helper 4941 2011-05-26 11:07:57Z jordi $
+# -------
+
+set -e
+
+CONF="/etc/kunoichi/when"
+PACKAGE="kunoichi"
+
+if [ ! -r $CONF ]; then
+    echo "Configuration file $CONF was not found."
+    exit 0
+fi
+
+# Sanity check: this shouldn't happen, as all scripts are in
+# the same package
+if [ ! -x /usr/sbin/kunoichi ]; then
+    echo "$PACKAGE is not executable. Reinstall $PACKAGE..."
+    exit 1
+fi
+
+# Read configuration variable file if it is present
+[ -r /etc/default/$PACKAGE ] && . /etc/default/$PACKAGE
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 {start|stop}"
+    exit 1
+fi
+
+case "$1" in
+  start)
+    # Find out if there are configured jobs
+    _queue=$(atq -q k)
+    if [ -n "$_queue" ]; then
+        # Cleanup queue "m".
+	$0 stop
+    fi
+    # Find all hosts configured to have a backup run
+    # Extract backup time
+    CONFTIME="$(sed -n -e '/^WHEN=/ { s/^.*="*\([^"#;]\+\).*$/\1/; p }' \
+      < $CONF)"
+    # Extract optional delay (+ X time_unit in “at timespec”)
+    CONFDELAY="+ $(sed -n -e '/^DELAY=/ { s/^.*="*\([^"#;]\+\).*$/\1/; p }' \
+      < $CONF)"
+    MAILTO="$(sed -n -e '/^MAILTO=/ { s/^.*="*\([^"#;]\+\).*$/\1/; p }' \
+      < $CONF)"
+    # If MAILTO is not defined, send mail to root
+    if [ -z "$MAILTO" ]; then
+        MAILTO="root"
+    fi
+    # If host is configured to run, install an at job for this host,
+    # using queue "m"
+    if [ -n "$CONFTIME" ]; then
+        # If a delay is configured, add it to the at time spec.
+        if [ -n "$CONFDELAY" ]; then
+            CONFTIME="$CONFTIME $CONFDELAY"
+        fi
+        hostname=$(hostname)
+        # If BRAND is not defined, default to "ITI".
+        if [ -z "$BRAND" ]; then
+            BRAND="ITI"
+        fi
+        echo "kunoichi 2>&1 | \
+          mail -e -s \"$PACKAGE backup result for '$hostname'\" \
+          $MAILTO" 2> /dev/null | at $CONFTIME -q k 2> /dev/null
+    fi
+    # Additionally, install a new run of this script for the next day
+    echo "/usr/lib/kunoichi/at-helper start" | \
+    at 06:59 $CONFDELAY -q k 2> /dev/null
+    ;;
+  stop)
+    # Delete all jobs
+    for mjob in $(atq -q k | awk '{ print $1 }'); do
+        atrm $mjob
+    done
+    ;;
+  *)
+    echo "Unknown action \"$1\"."
+    echo "Valid values are \"start\" and \"stop\"."
+    exit 1
+    ;;
+esac
