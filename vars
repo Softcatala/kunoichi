@@ -12,7 +12,7 @@ LVCREATE="/sbin/lvcreate"
 LVREMOVE="/sbin/lvremove"
 LVS="/sbin/lvs"
 # LXC
-LXC_LS="/usr/bin/lxc-ls
+LXC_LS="/usr/bin/lxc-ls"
 LXC_ATTACH="/usr/bin/lxc-attach"
 LXC_INFO="/usr/bin/lxc-info"
 LXC_DIR="/srv/lxc"
