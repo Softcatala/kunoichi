@@ -797,10 +797,10 @@ for srv in $($LXC_LS); do
 
     # Do an rdiff-backup for the LXC container
     $RDIFF $RDIFF_OPTS \
-      --exclude "$SNAP_DIR$LXC_DIR/$srv/tmp/*" \
+      --exclude "$SNAP_DIR/$srv/tmp/*" \
       $EXTRA_EXCLUDES \
       $LXC_CHROOT_EXCLUDES \
-      --include $SNAP_DIR$LXC_DIR/$srv \
+      --include $SNAP_DIR/$srv \
       $EXTRA_INCLUDES \
       $LXC_CHROOT_INCLUDES \
       --exclude '/*' \
